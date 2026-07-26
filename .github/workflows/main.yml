@@ -1,6 +1,8 @@
 name: Build Galaxy AI Camera APK
 
 on:
+  push:
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -8,32 +10,67 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      # 1. Set up JDK 17 (Without 'cache: gradle' to prevent failure)
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: 17
+          java-version: '17'
+          distribution: 'temurin'
 
-      - name: Install Gradle
+      # 2. Locate and extract galaxy-ai-camera.zip
+      - name: Extract zip archive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gradle
+          echo "Locating galaxy-ai-camera.zip..."
+          ZIP_PATH=$(find . -name "galaxy-ai-camera.zip" | head -n 1)
+          
+          if [ -z "$ZIP_PATH" ]; then
+            echo "Error: galaxy-ai-camera.zip was not found in the repository!"
+            exit 1
+          fi
+          
+          echo "Extracting $ZIP_PATH..."
+          unzip -q "$ZIP_PATH" -d source-folder
+          
+          # Find directory containing build.gradle or build.gradle.kts
+          BUILD_FILE=$(find source-folder -name "build.gradle" -o -name "build.gradle.kts" | head -n 1)
+          
+          if [ -z "$BUILD_FILE" ]; then
+            echo "Error: No build.gradle or build.gradle.kts found inside the unzipped archive!"
+            exit 1
+          fi
+          
+          PROJECT_DIR=$(dirname "$BUILD_FILE")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Found project root at: $PROJECT_DIR"
 
-      - name: Extract Project
+      # 3. Check for existing wrapper or generate a new one
+      - name: Ensure Gradle Wrapper Exists
         run: |
-          unzip galaxy-ai-camera.zip -d project
+          cd "$PROJECT_DIR"
+          
+          if [ -f "gradlew" ]; then
+            echo "Gradle wrapper found!"
+            chmod +x gradlew
+          else
+            echo "No gradlew found. Installing system Gradle and generating wrapper..."
+            sudo apt-get update && sudo apt-get install -y gradle
+            gradle wrapper
+            chmod +x gradlew
+          fi
 
-      - name: Build APK
+      # 4. Compile the Debug APK
+      - name: Build Debug APK
         run: |
-          cd project
-          gradle assembleDebug
+          cd "$PROJECT_DIR"
+          ./gradlew assembleDebug --stacktrace
 
-      - name: Upload APK
+      # 5. Upload APK to GitHub Artifacts
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Galaxy-AI-Camera-APK
-          path: |
-            project/**/build/outputs/apk/**/*.apk
+          name: galaxy-ai-camera-debug
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          retention-days: 7
