@@ -13,12 +13,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      # Set up JDK 8 (Matches legacy Gradle 4.4.1)
+      - name: Set up JDK 8
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '8'
           distribution: 'temurin'
 
+      # Locate and extract galaxy-ai-camera.zip
       - name: Extract zip archive
         run: |
           echo "Locating galaxy-ai-camera.zip..."
@@ -43,32 +45,24 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
           echo "Found project root at: $PROJECT_DIR"
 
-      - name: Force Upgrade Gradle Wrapper to 8.5
+      # Make sure gradlew script is executable
+      - name: Prepare Gradle Wrapper
         run: |
           cd "$PROJECT_DIR"
-          
-          # Create wrapper directory structure
-          mkdir -p gradle/wrapper
-          
-          # Force distribution URL to Gradle 8.5 (Java 17 compatible)
-          cat << 'EOF' > gradle/wrapper/gradle-wrapper.properties
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+          else
+            echo "Error: gradlew executable is missing from project!"
+            exit 1
+          fi
 
-          # Download official wrapper launcher files directly
-          curl -sSL "https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradle/wrapper/gradle-wrapper.jar" -o gradle/wrapper/gradle-wrapper.jar
-          curl -sSL "https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradlew" -o gradlew
-          chmod +x gradlew
-
+      # Build Debug APK using native project wrapper
       - name: Build Debug APK
         run: |
           cd "$PROJECT_DIR"
           ./gradlew assembleDebug --stacktrace
 
+      # Upload generated APK
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
