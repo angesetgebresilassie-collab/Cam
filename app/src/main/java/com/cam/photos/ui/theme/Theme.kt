@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 
 /**
  * "Liquid Glass" look-alike for the iOS Photos style UI.
@@ -39,7 +40,7 @@ fun GlassSurface(
     cornerRadius: Int = 24,
     content: @Composable () -> Unit
 ) {
-    val shape = RoundedCornerShape(cornerRadius.dp())
+    val shape = RoundedCornerShape(cornerRadius.dp)
 
     Box(
         modifier = modifier.background(
@@ -60,5 +61,3 @@ fun PhotosAppTheme(content: @Composable () -> Unit) {
         content = content
     )
 }
-
-private fun Int.dp() = androidx.compose.ui.unit.Dp(this.toFloat())
