@@ -6,20 +6,16 @@ import android.provider.MediaStore
 import androidx.paging.PagingSource
 import androidx.paging.PagingState
 
+/**
+ * Android translation of the Swift app's PHAsset image fetch.
+ * Equivalent to PHAsset.fetchAssets(with: .image, ...).
+ */
 data class MediaItem(
     val id: Long,
     val uri: android.net.Uri,
-    val dateTakenMillis: Long,
-    val isVideo: Boolean,
-    val durationMillis: Long = 0L
+    val dateTakenMillis: Long
 )
 
-/**
- * Pages through MediaStore (images + video) newest-first without ever
- * loading the full library into memory. This is the key anti-lag piece
- * for the Library grid: each page is a small cursor window, and Coil
- * handles thumbnail decoding/caching per-item lazily as cells scroll in.
- */
 class MediaPagingSource(
     private val context: Context
 ) : PagingSource<Int, MediaItem>() {
@@ -36,56 +32,45 @@ class MediaPagingSource(
         val pageSize = params.loadSize
 
         return try {
-            val items = queryPage(offset = page * pageSize, limit = pageSize)
+            val items = queryImages(page * pageSize, pageSize)
             LoadResult.Page(
                 data = items,
                 prevKey = if (page == 0) null else page - 1,
                 nextKey = if (items.isEmpty()) null else page + 1
             )
-        } catch (e: Exception) {
-            LoadResult.Error(e)
+        } catch (error: Exception) {
+            LoadResult.Error(error)
         }
     }
 
-    private fun queryPage(offset: Int, limit: Int): List<MediaItem> {
-        val collection = MediaStore.Files.getContentUri("external")
+    private fun queryImages(offset: Int, limit: Int): List<MediaItem> {
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(
-            MediaStore.Files.FileColumns._ID,
-            MediaStore.Files.FileColumns.DATE_TAKEN,
-            MediaStore.Files.FileColumns.MEDIA_TYPE,
-            MediaStore.Video.VideoColumns.DURATION
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DATE_TAKEN
         )
-        val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ? OR " +
-            "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ?"
-        val selectionArgs = arrayOf(
-            MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
-            MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
-        )
-        val sortOrder = "${MediaStore.Files.FileColumns.DATE_TAKEN} DESC LIMIT $limit OFFSET $offset"
+        val sortOrder =
+            "${MediaStore.Images.Media.DATE_TAKEN} DESC LIMIT $limit OFFSET $offset"
 
-        val results = mutableListOf<MediaItem>()
+        val result = ArrayList<MediaItem>(limit)
+
         context.contentResolver.query(
-            collection, projection, selection, selectionArgs, sortOrder
+            collection, projection, null, null, sortOrder
         )?.use { cursor ->
-            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
-            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_TAKEN)
-            val typeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
-            val durCol = cursor.getColumnIndex(MediaStore.Video.VideoColumns.DURATION)
+            val idColumn =
+                cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val dateColumn =
+                cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
 
             while (cursor.moveToNext()) {
-                val id = cursor.getLong(idCol)
-                val isVideo = cursor.getInt(typeCol) == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
-                val baseUri = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                    else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                results += MediaItem(
+                val id = cursor.getLong(idColumn)
+                result += MediaItem(
                     id = id,
-                    uri = ContentUris.withAppendedId(baseUri, id),
-                    dateTakenMillis = cursor.getLong(dateCol),
-                    isVideo = isVideo,
-                    durationMillis = if (isVideo && durCol >= 0) cursor.getLong(durCol) else 0L
+                    uri = ContentUris.withAppendedId(collection, id),
+                    dateTakenMillis = cursor.getLong(dateColumn)
                 )
             }
         }
-        return results
+        return result
     }
 }
