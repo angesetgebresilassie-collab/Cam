@@ -31,7 +31,7 @@ class MediaPagingSource(
         }
     }
 
-    override fun load(params: LoadParams<Int>): LoadResult<Int, MediaItem> {
+    override suspend fun load(params: LoadParams<Int>): LoadResult<Int, MediaItem> {
         val page = params.key ?: 0
         val pageSize = params.loadSize
 
