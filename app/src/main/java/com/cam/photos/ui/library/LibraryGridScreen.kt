@@ -1,18 +1,26 @@
 package com.cam.photos.ui.library
 
 import android.content.Context
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
+import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil.compose.AsyncImage
@@ -23,52 +31,80 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Library grid, iOS-Photos style: dense square thumbnails, newest first.
- * Paging3 + Coil do the heavy lifting for lag-free scrolling:
- *  - Paging3 only ever keeps a few pages of MediaItem in memory (cheap, no bitmaps)
- *  - Coil decodes/caches each thumbnail lazily as its cell scrolls into view,
- *    and cancels the decode automatically if the cell scrolls back out first
+ * Translation of the Swift UICollectionView Photos grid:
+ * - starts at 4 items per row
+ * - pinch in: 4 -> 3 -> 1
+ * - pinch out: 1 -> 3 -> 4
+ * - square aspect-fill thumbnails
+ * - lazy/cached image loading
  */
-fun mediaPagingFlow(context: Context, scope: CoroutineScope): Flow<androidx.paging.PagingData<MediaItem>> {
-    return Pager(
-        config = PagingConfig(pageSize = 60, prefetchDistance = 30, enablePlaceholders = false),
+fun mediaPagingFlow(
+    context: Context,
+    scope: CoroutineScope
+): Flow<PagingData<MediaItem>> =
+    Pager(
+        config = PagingConfig(
+            pageSize = 60,
+            prefetchDistance = 30,
+            enablePlaceholders = false
+        ),
         pagingSourceFactory = { MediaPagingSource(context) }
     ).flow.cachedIn(scope)
-}
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LibraryGridScreen(
-    pagingFlow: Flow<androidx.paging.PagingData<MediaItem>>,
-    onItemClick: (MediaItem) -> Unit
+    pagingFlow: Flow<PagingData<MediaItem>>,
+    onItemClick: (MediaItem) -> Unit = {}
 ) {
     val lazyItems = pagingFlow.collectAsLazyPagingItems()
+    var columns by remember { mutableIntStateOf(4) }
+    var accumulatedZoom by remember { mutableFloatStateOf(1f) }
 
     LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
-        modifier = Modifier.fillMaxSize()
+        columns = GridCells.Fixed(columns),
+        modifier = Modifier
+            .fillMaxWidth()
+            .pointerInput(columns) {
+                detectTransformGestures { _, _, zoom, _ ->
+                    accumulatedZoom *= zoom
+
+                    if (accumulatedZoom >= 1.35f) {
+                        accumulatedZoom = 1f
+                        columns = when (columns) {
+                            4 -> 3
+                            3 -> 1
+                            else -> 1
+                        }
+                    } else if (accumulatedZoom <= 0.75f) {
+                        accumulatedZoom = 1f
+                        columns = when (columns) {
+                            1 -> 3
+                            3 -> 4
+                            else -> 4
+                        }
+                    }
+                }
+            }
     ) {
-        items(lazyItems.itemCount) { index ->
-            val item = lazyItems[index]
-            if (item != null) {
-                ThumbnailCell(item = item, onClick = { onItemClick(item) })
+        items(
+            count = lazyItems.itemCount,
+            key = { index -> lazyItems[index]?.id ?: index }
+        ) { index ->
+            lazyItems[index]?.let { item ->
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(item.uri)
+                        .size(320)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = "Photo",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                )
             }
         }
     }
-}
-
-@Composable
-private fun ThumbnailCell(item: MediaItem, onClick: () -> Unit) {
-    AsyncImage(
-        model = ImageRequest.Builder(androidx.compose.ui.platform.LocalContext.current)
-            .data(item.uri)
-            .size(240) // request a small thumbnail, not full-res — critical for grid scroll perf
-            .crossfade(true)
-            .build(),
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = Modifier
-            .aspectRatio(1f)
-            .fillMaxSize()
-            .then(Modifier)
-    )
 }
