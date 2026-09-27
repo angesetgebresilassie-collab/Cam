@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Simple flower-ish glyph, evokes the iOS Photos icon silhouette without copying it -->
+    <path
+        android:fillColor="#0A84FF"
+        android:pathData="M54,30 C60,30 65,35 65,41 C65,47 60,52 54,54 C48,52 43,47 43,41 C43,35 48,30 54,30 Z" />
+    <path
+        android:fillColor="#FF9F0A"
+        android:pathData="M54,54 C60,54 65,59 65,65 C65,71 60,76 54,78 C48,76 43,71 43,65 C43,59 48,54 54,54 Z" />
+    <path
+        android:fillColor="#FF375F"
+        android:pathData="M30,54 C30,48 35,43 41,43 C47,43 52,48 54,54 C52,60 47,65 41,65 C35,65 30,60 30,54 Z" />
+    <path
+        android:fillColor="#30D158"
+        android:pathData="M78,54 C78,60 73,65 67,65 C61,65 56,60 54,54 C56,48 61,43 67,43 C73,43 78,48 78,54 Z" />
+</vector>
