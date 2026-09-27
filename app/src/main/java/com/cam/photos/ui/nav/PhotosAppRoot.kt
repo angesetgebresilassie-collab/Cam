@@ -10,6 +10,8 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -17,9 +19,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -67,17 +71,17 @@ fun PhotosAppRoot() {
 }
 
 @Composable
-private fun GlassTabBar(navController: androidx.navigation.NavHostController) {
+private fun GlassTabBar(navController: NavHostController) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
 
-    androidx.compose.material3.NavigationBar(
-        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+    NavigationBar(
+        containerColor = Color.Transparent,
         tonalElevation = 0.dp
     ) {
         PhotosTab.all.forEach { tab ->
             val selected = currentDestination?.hierarchy?.any { it.route == tab.route } == true
-            androidx.compose.material3.NavigationBarItem(
+            NavigationBarItem(
                 selected = selected,
                 onClick = {
                     navController.navigate(tab.route) {
@@ -89,7 +93,7 @@ private fun GlassTabBar(navController: androidx.navigation.NavHostController) {
                 icon = { TabIcon(tab) },
                 label = { Text(tab.label) },
                 colors = NavigationBarItemDefaults.colors(
-                    indicatorColor = androidx.compose.ui.graphics.Color.Transparent
+                    indicatorColor = Color.Transparent
                 )
             )
         }
@@ -107,7 +111,22 @@ private fun TabIcon(tab: PhotosTab) {
 }
 
 // Placeholders — replaced by real screens next
-@Composable fun LibraryScreenPlaceholder() { Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Library grid coming next") } }
-@Composable fun ForYouScreenPlaceholder() { Box(Modifier.fillMaxSize(), Alignment.Center) { Text("For You (incl. Year Recap) coming next") } }
-@Composable fun AlbumsScreenPlaceholder() { Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Albums coming next") } }
-@Composable fun SearchScreenPlaceholder() { Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Search coming next") } }
+@Composable
+fun LibraryScreenPlaceholder() {
+    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Library grid coming next") }
+}
+
+@Composable
+fun ForYouScreenPlaceholder() {
+    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("For You (incl. Year Recap) coming next") }
+}
+
+@Composable
+fun AlbumsScreenPlaceholder() {
+    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Albums coming next") }
+}
+
+@Composable
+fun SearchScreenPlaceholder() {
+    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Search coming next") }
+}
