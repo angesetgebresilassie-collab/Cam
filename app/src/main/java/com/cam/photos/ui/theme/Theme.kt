@@ -1,6 +1,5 @@
 package com.cam.photos.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -8,19 +7,22 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
 
 /**
  * "Liquid Glass" look-alike for the iOS Photos style UI.
- * Real backdrop blur needs Android 12+ (RenderEffect); below that we fall
- * back to a translucent tinted scrim so it still reads as "glass" without
- * tanking frame rate on older devices.
+ *
+ * IMPORTANT: this must only tint/shade what's BEHIND the content, never
+ * blur the content itself. An earlier version applied Modifier.blur()
+ * to this Box, which blurs everything drawn inside it — icons, labels,
+ * all of it — turning legible UI into smudged blobs. True backdrop blur
+ * (blurring only what's visually behind a surface) needs a dedicated
+ * capture-and-blur pass; until that's added, a translucent tinted
+ * gradient gives the "frosted glass" look without touching the content.
  */
 
-val GlassTint = Color(0x33FFFFFF)
+val GlassTint = Color(0x40FFFFFF)
 val GlassBorder = Color(0x55FFFFFF)
 
 val PhotosDarkColorScheme = darkColorScheme(
@@ -37,20 +39,15 @@ fun GlassSurface(
     cornerRadius: Int = 24,
     content: @Composable () -> Unit
 ) {
-    val shape = RoundedCornerShape(cornerRadius.dp)
-    val supportsBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val shape = RoundedCornerShape(cornerRadius.dp())
 
     Box(
-        modifier = modifier
-            .then(
-                if (supportsBlur) Modifier.blur(20.dp) else Modifier
-            )
-            .background(
-                brush = Brush.verticalGradient(
-                    listOf(GlassTint, GlassTint.copy(alpha = 0.15f))
-                ),
-                shape = shape
-            )
+        modifier = modifier.background(
+            brush = Brush.verticalGradient(
+                listOf(GlassTint, GlassTint.copy(alpha = 0.2f))
+            ),
+            shape = shape
+        )
     ) {
         content()
     }
@@ -63,3 +60,5 @@ fun PhotosAppTheme(content: @Composable () -> Unit) {
         content = content
     )
 }
+
+private fun Int.dp() = androidx.compose.ui.unit.Dp(this.toFloat())
