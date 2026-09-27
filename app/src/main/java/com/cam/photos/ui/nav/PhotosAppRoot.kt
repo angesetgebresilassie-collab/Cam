@@ -2,6 +2,7 @@ package com.cam.photos.ui.nav
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -48,9 +49,11 @@ fun PhotosAppRoot() {
 
     Scaffold(
         bottomBar = {
+            // IMPORTANT: fillMaxWidth, not fillMaxSize — this slot must only
+            // be as tall as the tab bar itself, or it swallows the whole screen.
             GlassSurface(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .fillMaxWidth()
                     .height(84.dp)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 cornerRadius = 28
@@ -59,7 +62,7 @@ fun PhotosAppRoot() {
             }
         }
     ) { innerPadding ->
-        Box(modifier = Modifier.padding(innerPadding)) {
+        Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             NavHost(navController = navController, startDestination = PhotosTab.Library.route) {
                 composable(PhotosTab.Library.route) { LibraryScreenPlaceholder() }
                 composable(PhotosTab.ForYou.route) { ForYouScreenPlaceholder() }
