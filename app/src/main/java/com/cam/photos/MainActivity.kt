@@ -10,14 +10,13 @@ import com.cam.photos.ui.nav.PhotosAppRoot
 import com.cam.photos.ui.theme.PhotosAppTheme
 
 class MainActivity : ComponentActivity() {
-
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { /* grid screen re-queries MediaStore once permission state changes */ }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestMediaPermissionsIfNeeded()
+        requestPhotoPermissionIfNeeded()
 
         setContent {
             PhotosAppTheme {
@@ -26,12 +25,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestMediaPermissionsIfNeeded() {
-        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+    private fun requestPhotoPermissionIfNeeded() {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
         } else {
-            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            Manifest.permission.READ_EXTERNAL_STORAGE
         }
-        permissionLauncher.launch(permissions)
+        permissionLauncher.launch(arrayOf(permission))
     }
 }
