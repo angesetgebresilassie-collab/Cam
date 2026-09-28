@@ -18,6 +18,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,11 +36,12 @@ import com.cam.photos.ui.library.LibraryGridScreen
 import com.cam.photos.ui.library.mediaPagingFlow
 import com.cam.photos.ui.theme.GlassSurface
 
+// Mirrors the real iOS Photos app tab bar: Library, For You, Albums, Search
 sealed class PhotosTab(val route: String, val label: String) {
-    data object Library : PhotosTab("library", "Library")
-    data object ForYou : PhotosTab("for_you", "For You")
-    data object Albums : PhotosTab("albums", "Albums")
-    data object Search : PhotosTab("search", "Search")
+    object Library : PhotosTab("library", "Library")
+    object ForYou : PhotosTab("for_you", "For You")
+    object Albums : PhotosTab("albums", "Albums")
+    object Search : PhotosTab("search", "Search")
 
     companion object {
         val all = listOf(Library, ForYou, Albums, Search)
@@ -47,14 +49,17 @@ sealed class PhotosTab(val route: String, val label: String) {
 }
 
 @Composable
-fun PhotosAppRoot() {
+fun PhotosAppRoot(hasMediaPermission: Boolean) {
     val navController = rememberNavController()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val pagingFlow = mediaPagingFlow(context, scope)
+
+    // Re-created when permission flips to granted, so the query re-runs and photos appear.
+    val pagingFlow = remember(hasMediaPermission) { mediaPagingFlow(context, scope) }
 
     Scaffold(
         bottomBar = {
+            // fillMaxWidth (not fillMaxSize): this slot must only be as tall as the bar.
             GlassSurface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -66,17 +71,16 @@ fun PhotosAppRoot() {
             }
         }
     ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            NavHost(
-                navController = navController,
-                startDestination = PhotosTab.Library.route
-            ) {
+        Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            NavHost(navController = navController, startDestination = PhotosTab.Library.route) {
                 composable(PhotosTab.Library.route) {
-                    LibraryGridScreen(pagingFlow = pagingFlow)
+                    if (hasMediaPermission) {
+                        LibraryGridScreen(pagingFlow = pagingFlow, onItemClick = { })
+                    } else {
+                        Box(Modifier.fillMaxSize(), Alignment.Center) {
+                            Text("Allow photo access to see your library")
+                        }
+                    }
                 }
                 composable(PhotosTab.ForYou.route) { ForYouScreenPlaceholder() }
                 composable(PhotosTab.Albums.route) { AlbumsScreenPlaceholder() }
@@ -96,16 +100,12 @@ private fun GlassTabBar(navController: NavHostController) {
         tonalElevation = 0.dp
     ) {
         PhotosTab.all.forEach { tab ->
-            val selected =
-                currentDestination?.hierarchy?.any { it.route == tab.route } == true
-
+            val selected = currentDestination?.hierarchy?.any { it.route == tab.route } == true
             NavigationBarItem(
                 selected = selected,
                 onClick = {
                     navController.navigate(tab.route) {
-                        popUpTo(navController.graph.findStartDestination().id) {
-                            saveState = true
-                        }
+                        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                         launchSingleTop = true
                         restoreState = true
                     }
@@ -123,28 +123,25 @@ private fun GlassTabBar(navController: NavHostController) {
 @Composable
 private fun TabIcon(tab: PhotosTab) {
     when (tab) {
-        PhotosTab.Library ->
-            Icon(Icons.Filled.DateRange, contentDescription = tab.label)
-        PhotosTab.ForYou ->
-            Icon(Icons.Filled.Favorite, contentDescription = tab.label)
-        PhotosTab.Albums ->
-            Icon(Icons.Filled.AccountCircle, contentDescription = tab.label)
-        PhotosTab.Search ->
-            Icon(Icons.Filled.Search, contentDescription = tab.label)
+        PhotosTab.Library -> Icon(Icons.Filled.DateRange, contentDescription = tab.label)
+        PhotosTab.ForYou -> Icon(Icons.Filled.Favorite, contentDescription = tab.label)
+        PhotosTab.Albums -> Icon(Icons.Filled.AccountCircle, contentDescription = tab.label)
+        PhotosTab.Search -> Icon(Icons.Filled.Search, contentDescription = tab.label)
     }
 }
 
+// Placeholders — replaced by real screens next
 @Composable
 fun ForYouScreenPlaceholder() {
-    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("For You") }
+    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("For You (incl. Year Recap) coming next") }
 }
 
 @Composable
 fun AlbumsScreenPlaceholder() {
-    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Albums") }
+    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Albums coming next") }
 }
 
 @Composable
 fun SearchScreenPlaceholder() {
-    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Search") }
+    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Search coming next") }
 }
