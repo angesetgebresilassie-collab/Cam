@@ -1,20 +1,24 @@
 package com.cam.photos.ui.library
 
 import android.content.Context
-import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -25,6 +29,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
@@ -40,19 +45,22 @@ import coil.request.ImageRequest
 import com.cam.photos.data.MediaItem
 import com.cam.photos.data.MediaPagingSource
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
 /**
- * Library grid, iOS-Photos style, with smooth pinch-to-zoom.
+ * Library grid with pinch-to-zoom.
  *
- * Why pinching stays smooth with thousands of photos:
- *  - While fingers are down, the whole grid is only scaled with graphicsLayer
- *    (a GPU transform). No relayout, no recomposition, no image reloads.
- *  - Only when the pinch crosses a threshold do we swap the column count once,
- *    then spring the scale back to 1 so the change looks continuous.
- *  - Paging3 keeps just a few pages of lightweight MediaItem objects in memory,
- *    Coil decodes thumbnails lazily at the size each cell actually needs.
+ * Lag fixes vs. the first version:
+ *  - ONE fixed thumbnail size for every zoom level, so changing columns never
+ *    invalidates the image cache or triggers a wave of re-decodes.
+ *  - Wide hysteresis (1.5 / 0.65) and continuity scaling, so a wobbling pinch
+ *    can't flip-flop between column counts every few frames.
+ *  - Pinch state is a plain float read in a graphicsLayer lambda: no coroutine
+ *    per touch event, no recomposition while fingers move.
+ *  - RGB_565 thumbnails (half the memory / bandwidth), stable item keys,
+ *    requests remembered per cell.
  */
 fun mediaPagingFlow(context: Context, scope: CoroutineScope): Flow<PagingData<MediaItem>> {
     return Pager(
@@ -61,13 +69,16 @@ fun mediaPagingFlow(context: Context, scope: CoroutineScope): Flow<PagingData<Me
     ).flow.cachedIn(scope)
 }
 
-// Column counts for each zoom level, like iOS Photos (big -> tiny cells).
-private val COLUMN_STEPS = listOf(1, 3, 5, 8)
+private val COLUMN_STEPS = listOf(2, 3, 5, 8)
 private const val DEFAULT_STEP = 1 // 3 columns
+private const val THUMB_PX = 320
+private const val ZOOM_IN_THRESHOLD = 1.5f
+private const val ZOOM_OUT_THRESHOLD = 0.65f
 
 @Composable
 fun LibraryGridScreen(
     pagingFlow: Flow<PagingData<MediaItem>>,
+    bottomPadding: Dp,
     onItemClick: (MediaItem) -> Unit
 ) {
     val context = LocalContext.current
@@ -75,56 +86,60 @@ fun LibraryGridScreen(
     val lazyItems = pagingFlow.collectAsLazyPagingItems()
 
     var stepIndex by rememberSaveable { mutableIntStateOf(DEFAULT_STEP) }
-    val columns = COLUMN_STEPS[stepIndex]
-    val pinchScale = remember { Animatable(1f) }
+    var liveScale by remember { mutableFloatStateOf(1f) }
+    var settleJob by remember { mutableStateOf<Job?>(null) }
 
-    // One shared loader: video frame decoding + a generous memory cache.
     val imageLoader = remember(context) {
         ImageLoader.Builder(context)
             .components { add(VideoFrameDecoder.Factory()) }
             .memoryCache { MemoryCache.Builder(context).maxSizePercent(0.30).build() }
-            .crossfade(false) // crossfades cost frames during fast scrolling
+            .crossfade(false)
             .build()
     }
-
-    val screenWidthPx = context.resources.displayMetrics.widthPixels
-    val thumbPx = (screenWidthPx / columns).coerceIn(120, 720)
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .pinchZoom(
                 onZoom = { zoom ->
-                    scope.launch {
-                        var s = (pinchScale.value * zoom).coerceIn(0.4f, 3f)
-                        val idx = stepIndex
-                        if (s > 1.3f && idx > 0) {
-                            // zoom in -> fewer, bigger cells
-                            val newIdx = idx - 1
-                            s *= COLUMN_STEPS[newIdx].toFloat() / COLUMN_STEPS[idx]
-                            stepIndex = newIdx
-                        } else if (s < 0.77f && idx < COLUMN_STEPS.lastIndex) {
-                            // zoom out -> more, smaller cells
-                            val newIdx = idx + 1
-                            s *= COLUMN_STEPS[newIdx].toFloat() / COLUMN_STEPS[idx]
-                            stepIndex = newIdx
-                        }
-                        pinchScale.snapTo(s)
+                    settleJob?.cancel()
+                    var s = (liveScale * zoom).coerceIn(0.4f, 3f)
+                    var idx = stepIndex
+                    while (s > ZOOM_IN_THRESHOLD && idx > 0) {
+                        val next = idx - 1
+                        s *= COLUMN_STEPS[next].toFloat() / COLUMN_STEPS[idx]
+                        idx = next
                     }
+                    while (s < ZOOM_OUT_THRESHOLD && idx < COLUMN_STEPS.lastIndex) {
+                        val next = idx + 1
+                        s *= COLUMN_STEPS[next].toFloat() / COLUMN_STEPS[idx]
+                        idx = next
+                    }
+                    if (idx != stepIndex) stepIndex = idx
+                    liveScale = s
                 },
-                onEnd = { scope.launch { pinchScale.animateTo(1f, spring()) } }
+                onEnd = {
+                    settleJob?.cancel()
+                    settleJob = scope.launch {
+                        animate(
+                            initialValue = liveScale,
+                            targetValue = 1f,
+                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
+                        ) { value, _ -> liveScale = value }
+                    }
+                }
             )
     ) {
         LazyVerticalGrid(
-            columns = GridCells.Fixed(columns),
+            columns = GridCells.Fixed(COLUMN_STEPS[stepIndex]),
+            contentPadding = PaddingValues(bottom = bottomPadding),
             horizontalArrangement = Arrangement.spacedBy(1.dp),
             verticalArrangement = Arrangement.spacedBy(1.dp),
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    // Read inside the lambda: animates on the GPU, no recomposition.
-                    scaleX = pinchScale.value
-                    scaleY = pinchScale.value
+                    scaleX = liveScale
+                    scaleY = liveScale
                 }
         ) {
             items(
@@ -133,7 +148,7 @@ fun LibraryGridScreen(
             ) { index ->
                 val item = lazyItems[index]
                 if (item != null) {
-                    ThumbnailCell(item = item, sizePx = thumbPx, imageLoader = imageLoader)
+                    ThumbnailCell(item = item, imageLoader = imageLoader)
                 }
             }
         }
@@ -141,12 +156,18 @@ fun LibraryGridScreen(
 }
 
 @Composable
-private fun ThumbnailCell(item: MediaItem, sizePx: Int, imageLoader: ImageLoader) {
-    AsyncImage(
-        model = ImageRequest.Builder(LocalContext.current)
+private fun ThumbnailCell(item: MediaItem, imageLoader: ImageLoader) {
+    val context = LocalContext.current
+    val request = remember(item.id) {
+        ImageRequest.Builder(context)
             .data(item.uri)
-            .size(sizePx) // decode only as big as the cell needs
-            .build(),
+            .size(THUMB_PX)
+            .allowRgb565(true)
+            .memoryCacheKey("t${item.id}")
+            .build()
+    }
+    AsyncImage(
+        model = request,
         imageLoader = imageLoader,
         contentDescription = null,
         contentScale = ContentScale.Crop,
@@ -155,9 +176,8 @@ private fun ThumbnailCell(item: MediaItem, sizePx: Int, imageLoader: ImageLoader
 }
 
 /**
- * Watches for two-finger pinches BEFORE the grid sees them (Initial pass) and
- * only consumes the event when 2+ fingers are down, so one-finger scrolling
- * still works normally.
+ * Sees two-finger pinches BEFORE the grid (Initial pass) and only consumes
+ * events while 2+ fingers are down, so one-finger scrolling is untouched.
  */
 private fun Modifier.pinchZoom(
     onZoom: (Float) -> Unit,
