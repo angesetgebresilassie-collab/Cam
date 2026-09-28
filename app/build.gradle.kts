@@ -47,4 +47,5 @@ dependencies {
     implementation("androidx.media3:media3-effect:1.4.1")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-video:2.7.0")
 }
