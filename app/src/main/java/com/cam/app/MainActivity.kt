@@ -288,7 +288,10 @@ class MainActivity : AppCompatActivity() {
         val previous = lensFacing
         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
             CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-        if (!bindCamera()) lensFacing = previous
+        bindCamera {
+            lensFacing = previous
+            bindCamera()
+        }
     }
 
     private fun showResult() {
@@ -330,26 +333,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun bindCamera(): Boolean {
-        return try {
-            val future = ProcessCameraProvider.getInstance(this)
-            val provider = future.get()
-            val preview = Preview.Builder().build()
-                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            val capture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .setJpegQuality(100)
-                .setFlashMode(flashMode)
-                .build()
-            val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
-            provider.unbindAll()
-            camera = provider.bindToLifecycle(this, selector, preview, capture)
-            imageCapture = capture
-            true
-        } catch (e: Exception) {
-            Toast.makeText(this, "Camera unavailable: ${e.message}", Toast.LENGTH_SHORT).show()
-            false
-        }
+    private fun bindCamera(onError: (() -> Unit)? = null) {
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            try {
+                val provider = future.get()
+                val preview = Preview.Builder().build()
+                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                val capture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .setJpegQuality(100)
+                    .setFlashMode(flashMode)
+                    .build()
+                val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
+                provider.unbindAll()
+                camera = provider.bindToLifecycle(this, selector, preview, capture)
+                imageCapture = capture
+            } catch (e: Exception) {
+                Toast.makeText(this, "Camera unavailable: ${e.message}", Toast.LENGTH_SHORT).show()
+                onError?.invoke()
+            }
+        }, ContextCompat.getMainExecutor(this))
     }
 
     private fun capture() {
