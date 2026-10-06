@@ -25,6 +25,12 @@ jobs:
           curl -fL -o app/src/main/assets/zerodce_512.tflite \
             https://huggingface.co/mlboydaisuke/zero-dce-litert/resolve/main/zerodce_512.tflite
           test -s app/src/main/assets/zerodce_512.tflite
+
+      - name: Download Real-ESRGAN General x4v3 model (BSD-3-Clause)
+        run: |
+          curl -fL -o app/src/main/assets/realesrgan_x4v3.tflite \
+            https://huggingface.co/qualcomm/Real-ESRGAN-General-x4v3/resolve/main/Real-ESRGAN-General-x4v3.tflite \
+            || rm -f app/src/main/assets/realesrgan_x4v3.tflite
           ls -l app/src/main/assets
 
       - name: Build debug APK
