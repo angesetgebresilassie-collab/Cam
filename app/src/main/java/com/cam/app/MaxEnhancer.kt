@@ -14,11 +14,12 @@ import kotlin.math.min
 /**
  * Max-quality, fully on-device pipeline:
  *  1) [base] (Zero-DCE tone/low-light + polish) on the full-resolution photo
- *  2) Real-ESRGAN General x4v3 run tile by tile on a working copy to restore detail
- *     and remove noise, mapped back to the original resolution and blended with step 1
+ *  2) Real-ESRGAN General x4v3 run tile by tile on a working copy, FORCED onto the GPU,
+ *     to restore detail and remove noise; mapped back to the original resolution and
+ *     blended with step 1.
  *
- * Slower than the other modes (seconds to tens of seconds). Uses the GPU when possible.
- * If the restore step fails, the result of step 1 is returned and [lastError] says why.
+ * There is deliberately no CPU fallback for step 2 (it would take minutes). If the GPU
+ * can't be used, the step-1 result is returned and [lastError] says why.
  */
 class MaxEnhancer(
     context: Context,
@@ -56,19 +57,16 @@ class MaxEnhancer(
         modelBuf.put(modelBytes)
         modelBuf.rewind()
 
-        // The GPU delegate must be created and used on the same thread, so everything
-        // happens inside this one call.
+        // GPU is forced. The delegate must be created and used on this same thread.
         var delegate: GpuDelegate? = null
         val interp: Interpreter = try {
-            delegate = GpuDelegate()
-            Interpreter(modelBuf, Interpreter.Options().addDelegate(delegate))
+            val d = GpuDelegate()
+            delegate = d
+            Interpreter(modelBuf, Interpreter.Options().addDelegate(d))
         } catch (t: Throwable) {
             delegate?.close()
-            delegate = null
-            modelBuf.rewind()
-            Interpreter(modelBuf, Interpreter.Options().setNumThreads(4))
+            throw IllegalStateException("GPU not available: ${t.message ?: t.javaClass.simpleName}")
         }
-        val usingGpu = delegate != null
 
         try {
             val inTensor = interp.getInputTensor(0)
@@ -88,9 +86,8 @@ class MaxEnhancer(
             val w0 = toned.width
             val h0 = toned.height
 
-            // Working copy: bigger on GPU, smaller on CPU to keep the time reasonable
-            val side = if (usingGpu) 2048 else 1280
-            val k = min(1f, side.toFloat() / maxOf(w0, h0))
+            // Working copy, long side up to 2048 (the GPU makes that affordable)
+            val k = min(1f, WORK_SIDE.toFloat() / maxOf(w0, h0))
             val ww = (w0 * k).toInt().coerceAtLeast(t)
             val wh = (h0 * k).toInt().coerceAtLeast(t)
             val work = Bitmap.createScaledBitmap(toned, ww, wh, true)
@@ -113,6 +110,7 @@ class MaxEnhancer(
             val outBuf = ByteBuffer.allocateDirect(outT * outT * 3 * 4).order(ByteOrder.nativeOrder())
             val outArr = FloatArray(outT * outT * 3)
             val keep = 1f - blend
+            val mix = blend
             var done = 0
 
             for (tyi in 0 until tilesY) {
@@ -141,7 +139,7 @@ class MaxEnhancer(
                     outBuf.rewind()
                     outBuf.asFloatBuffer().get(outArr)
 
-                    // Target region in the original-resolution image covered by this tile's core
+                    // Region of the original-resolution image covered by this tile's core
                     val xs = ceil(tx * sc * fx).toInt().coerceIn(0, w0)
                     val xe = if (cx1 >= ww) w0 else ceil(cx1 * sc * fx).toInt().coerceIn(0, w0)
                     val ys = ceil(ty * sc * fy).toInt().coerceIn(0, h0)
@@ -180,46 +178,48 @@ class MaxEnhancer(
                             }
                         }
 
-                        for (j in 0 until ny) {
-                            val rowBase = (ys + j) * w0
-                            for (i in 0 until nx) {
-                                var r = 0f
-                                var g = 0f
-                                var b = 0f
-                                for (sy in 0..1) {
-                                    val v0 = cv0[j * 2 + sy] * outT
-                                    val v1 = cv1[j * 2 + sy] * outT
-                                    val wv = cwv[j * 2 + sy]
-                                    for (sx in 0..1) {
-                                        val u0 = cu0[i * 2 + sx]
-                                        val u1 = cu1[i * 2 + sx]
-                                        val wu = cwu[i * 2 + sx]
-                                        val i00 = (v0 + u0) * 3
-                                        val i01 = (v0 + u1) * 3
-                                        val i10 = (v1 + u0) * 3
-                                        val i11 = (v1 + u1) * 3
-                                        val w00 = (1f - wu) * (1f - wv)
-                                        val w01 = wu * (1f - wv)
-                                        val w10 = (1f - wu) * wv
-                                        val w11 = wu * wv
-                                        r += outArr[i00] * w00 + outArr[i01] * w01 +
-                                            outArr[i10] * w10 + outArr[i11] * w11
-                                        g += outArr[i00 + 1] * w00 + outArr[i01 + 1] * w01 +
-                                            outArr[i10 + 1] * w10 + outArr[i11 + 1] * w11
-                                        b += outArr[i00 + 2] * w00 + outArr[i01 + 2] * w01 +
-                                            outArr[i10 + 2] * w10 + outArr[i11 + 2] * w11
+                        parallelRows(ny) { j0, j1 ->
+                            for (j in j0 until j1) {
+                                val rowBase = (ys + j) * w0
+                                for (i in 0 until nx) {
+                                    var r = 0f
+                                    var g = 0f
+                                    var b = 0f
+                                    for (sy in 0..1) {
+                                        val v0 = cv0[j * 2 + sy] * outT
+                                        val v1 = cv1[j * 2 + sy] * outT
+                                        val wv = cwv[j * 2 + sy]
+                                        for (sx in 0..1) {
+                                            val u0 = cu0[i * 2 + sx]
+                                            val u1 = cu1[i * 2 + sx]
+                                            val wu = cwu[i * 2 + sx]
+                                            val i00 = (v0 + u0) * 3
+                                            val i01 = (v0 + u1) * 3
+                                            val i10 = (v1 + u0) * 3
+                                            val i11 = (v1 + u1) * 3
+                                            val w00 = (1f - wu) * (1f - wv)
+                                            val w01 = wu * (1f - wv)
+                                            val w10 = (1f - wu) * wv
+                                            val w11 = wu * wv
+                                            r += outArr[i00] * w00 + outArr[i01] * w01 +
+                                                outArr[i10] * w10 + outArr[i11] * w11
+                                            g += outArr[i00 + 1] * w00 + outArr[i01 + 1] * w01 +
+                                                outArr[i10 + 1] * w10 + outArr[i11 + 1] * w11
+                                            b += outArr[i00 + 2] * w00 + outArr[i01 + 2] * w01 +
+                                                outArr[i10 + 2] * w10 + outArr[i11 + 2] * w11
+                                        }
                                     }
-                                }
-                                val rr = (r * 0.25f).coerceIn(0f, 1f) * 255f
-                                val gg = (g * 0.25f).coerceIn(0f, 1f) * 255f
-                                val bb = (b * 0.25f).coerceIn(0f, 1f) * 255f
+                                    val rr = (r * 0.25f).coerceIn(0f, 1f) * 255f
+                                    val gg = (g * 0.25f).coerceIn(0f, 1f) * 255f
+                                    val bb = (b * 0.25f).coerceIn(0f, 1f) * 255f
 
-                                val idx = rowBase + xs + i
-                                val p = px[idx]
-                                val nr = (((p shr 16) and 0xFF) * keep + rr * blend).toInt().coerceIn(0, 255)
-                                val ng = (((p shr 8) and 0xFF) * keep + gg * blend).toInt().coerceIn(0, 255)
-                                val nb = ((p and 0xFF) * keep + bb * blend).toInt().coerceIn(0, 255)
-                                px[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                                    val idx = rowBase + xs + i
+                                    val p = px[idx]
+                                    val nr = (((p shr 16) and 0xFF) * keep + rr * mix).toInt().coerceIn(0, 255)
+                                    val ng = (((p shr 8) and 0xFF) * keep + gg * mix).toInt().coerceIn(0, 255)
+                                    val nb = ((p and 0xFF) * keep + bb * mix).toInt().coerceIn(0, 255)
+                                    px[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                                }
                             }
                         }
                     }
@@ -240,5 +240,6 @@ class MaxEnhancer(
 
     private companion object {
         const val MODEL = "realesrgan_x4v3.tflite"
+        const val WORK_SIDE = 2048
     }
 }
