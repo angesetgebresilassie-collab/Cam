@@ -57,7 +57,7 @@ class MainActivity : AppCompatActivity() {
     private var useAi = BuildConfig.GEMINI_API_KEY.isNotBlank()
 
     private val hdEnhancer: Enhancer = AutoEnhancer()
-    private val aiEnhancer: Enhancer = GeminiEnhancer(BuildConfig.GEMINI_API_KEY, hdEnhancer)
+    private val aiEnhancer = GeminiEnhancer(BuildConfig.GEMINI_API_KEY, hdEnhancer)
 
     private var lastOriginal: Bitmap? = null
     private var lastEnhanced: Bitmap? = null
@@ -114,11 +114,12 @@ class MainActivity : AppCompatActivity() {
             visibility = View.GONE
             background = pill(0x99000000.toInt())
             setPadding(dp(14), dp(6), dp(14), dp(6))
+            maxLines = 4
         }
         root.addView(
             status,
             FrameLayout.LayoutParams(wrap, wrap, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
-                .apply { topMargin = dp(96) }
+                .apply { topMargin = dp(96); marginStart = dp(16); marginEnd = dp(16) }
         )
 
         spinner = ProgressBar(this).apply { visibility = View.GONE }
@@ -377,11 +378,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun enhance(raw: Bitmap, rotation: Int) {
-        setBusy(true, if (useAi) "Enhancing with AI..." else "Enhancing in HD...")
+        val ai = useAi
+        setBusy(true, if (ai) "Enhancing with AI..." else "Enhancing in HD...")
         lifecycleScope.launch {
             try {
                 val start = SystemClock.elapsedRealtime()
-                val enhancer = if (useAi) aiEnhancer else hdEnhancer
+                val enhancer: Enhancer = if (ai) aiEnhancer else hdEnhancer
                 val pair = withContext(Dispatchers.Default) {
                     val upright = if (rotation != 0) {
                         Bitmap.createBitmap(
@@ -402,7 +404,13 @@ class MainActivity : AppCompatActivity() {
                 lastEnhanced = enhanced
                 thumb.setImageBitmap(enhanced)
                 val secs = (SystemClock.elapsedRealtime() - start) / 1000.0
-                setBusy(false, "Saved in %.1fs".format(secs))
+                val aiError = if (ai) aiEnhancer.lastError else null
+                val msg = when {
+                    aiError != null -> "Gemini failed: $aiError. Used HD instead (%.1fs)".format(secs)
+                    ai -> "Enhanced with Gemini in %.1fs".format(secs)
+                    else -> "Enhanced in HD in %.1fs".format(secs)
+                }
+                setBusy(false, msg)
                 showResult()
             } catch (e: Throwable) {
                 setBusy(false, "Enhance failed: ${e.message}")
