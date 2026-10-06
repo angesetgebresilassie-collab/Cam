@@ -55,10 +55,12 @@ class MainActivity : AppCompatActivity() {
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var flashMode = ImageCapture.FLASH_MODE_OFF
 
-    // AI = on-device Zero-DCE model, HD = classic auto-enhance. Both fully offline.
-    private var useAi = true
+    // All modes are fully on-device.
+    // HD = classic auto-enhance, AI = Zero-DCE tone model, MAX = AI + Real-ESRGAN detail restore
+    private var mode = MODE_AI
     private val hdEnhancer: Enhancer = AutoEnhancer()
     private lateinit var aiEnhancer: LocalAiEnhancer
+    private lateinit var maxEnhancer: MaxEnhancer
 
     private var lastOriginal: Bitmap? = null
     private var lastEnhanced: Bitmap? = null
@@ -76,6 +78,10 @@ class MainActivity : AppCompatActivity() {
         window.navigationBarColor = Color.BLACK
 
         aiEnhancer = LocalAiEnhancer(this, hdEnhancer)
+        maxEnhancer = MaxEnhancer(this, aiEnhancer)
+        maxEnhancer.onProgress = { pct ->
+            runOnUiThread { showStatus("Max quality: restoring detail... $pct%") }
+        }
 
         val match = FrameLayout.LayoutParams.MATCH_PARENT
         val wrap = FrameLayout.LayoutParams.WRAP_CONTENT
@@ -89,11 +95,15 @@ class MainActivity : AppCompatActivity() {
         root.addView(previewView, FrameLayout.LayoutParams(match, match))
         setupGestures()
 
-        // Top bar: flash + AI/HD mode
+        // Top bar: flash + mode (AI / Max / HD)
         flashBtn = chip("\u26A1 Off").apply { setOnClickListener { cycleFlash() } }
         modeChip = chip("").apply {
             setOnClickListener {
-                useAi = !useAi
+                mode = when (mode) {
+                    MODE_AI -> MODE_MAX
+                    MODE_MAX -> MODE_HD
+                    else -> MODE_AI
+                }
                 updateModeLabel()
             }
         }
@@ -267,7 +277,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateModeLabel() {
-        modeChip.text = if (useAi) "\u2728 AI" else "HD"
+        modeChip.text = when (mode) {
+            MODE_MAX -> "\uD83D\uDC8E Max"
+            MODE_AI -> "\u2728 AI"
+            else -> "HD"
+        }
     }
 
     private fun updateFlashLabel() {
@@ -381,12 +395,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun enhance(raw: Bitmap, rotation: Int) {
-        val ai = useAi
-        setBusy(true, if (ai) "Enhancing with on-device AI..." else "Enhancing in HD...")
+        val m = mode
+        setBusy(
+            true,
+            when (m) {
+                MODE_MAX -> "Max quality: enhancing... this takes a while"
+                MODE_AI -> "Enhancing with on-device AI..."
+                else -> "Enhancing in HD..."
+            }
+        )
         lifecycleScope.launch {
             try {
                 val start = SystemClock.elapsedRealtime()
-                val enhancer: Enhancer = if (ai) aiEnhancer else hdEnhancer
+                val enhancer: Enhancer = when (m) {
+                    MODE_MAX -> maxEnhancer
+                    MODE_AI -> aiEnhancer
+                    else -> hdEnhancer
+                }
                 val pair = withContext(Dispatchers.Default) {
                     val upright = if (rotation != 0) {
                         Bitmap.createBitmap(
@@ -407,10 +432,13 @@ class MainActivity : AppCompatActivity() {
                 lastEnhanced = enhanced
                 thumb.setImageBitmap(enhanced)
                 val secs = (SystemClock.elapsedRealtime() - start) / 1000.0
-                val aiError = if (ai) aiEnhancer.lastError else null
+                val aiError = if (m >= MODE_AI) aiEnhancer.lastError else null
+                val maxError = if (m == MODE_MAX) maxEnhancer.lastError else null
                 val msg = when {
+                    maxError != null -> "Max detail pass failed: $maxError. Kept the AI result (%.1fs)".format(secs)
                     aiError != null -> "On-device AI failed: $aiError. Used HD instead (%.1fs)".format(secs)
-                    ai -> "Enhanced with on-device AI in %.1fs".format(secs)
+                    m == MODE_MAX -> "Max quality done in %.1fs".format(secs)
+                    m == MODE_AI -> "Enhanced with on-device AI in %.1fs".format(secs)
                     else -> "Enhanced in HD in %.1fs".format(secs)
                 }
                 setBusy(false, msg)
@@ -432,5 +460,11 @@ class MainActivity : AppCompatActivity() {
         contentResolver.openOutputStream(uri)?.use {
             bitmap.compress(Bitmap.CompressFormat.JPEG, 98, it)
         }
+    }
+
+    private companion object {
+        const val MODE_HD = 0
+        const val MODE_AI = 1
+        const val MODE_MAX = 2
     }
 }
