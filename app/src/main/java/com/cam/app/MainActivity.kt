@@ -37,7 +37,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var shutter: Button
     private var imageCapture: ImageCapture? = null
-    private val enhancer: Enhancer = AutoEnhancer()
+
+    // Gemini first, on-device enhancer as fallback
+    private val enhancer: Enhancer = GeminiEnhancer(BuildConfig.GEMINI_API_KEY, AutoEnhancer())
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -125,7 +127,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun enhance(raw: Bitmap, rotation: Int) {
-        status.text = "Enhancing..."
+        status.text = "Enhancing with AI..."
         lifecycleScope.launch {
             val start = SystemClock.elapsedRealtime()
             val result = withContext(Dispatchers.Default) {
