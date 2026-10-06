@@ -12,17 +12,11 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1"
-
-        // Set via GitHub secret GEMINI_API_KEY, env var, or -PGEMINI_API_KEY=...
-        val geminiKey = (project.findProperty("GEMINI_API_KEY") as String?)
-            ?: System.getenv("GEMINI_API_KEY")
-            ?: ""
-        buildConfigField("String", "GEMINI_API_KEY", "\"$geminiKey\"")
+        versionName = "0.2"
     }
 
-    buildFeatures {
-        buildConfig = true
+    androidResources {
+        noCompress += "tflite"
     }
 
     compileOptions {
@@ -39,6 +33,9 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // On-device AI
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
 
     val camerax = "1.3.4"
     implementation("androidx.camera:camera-core:$camerax")
