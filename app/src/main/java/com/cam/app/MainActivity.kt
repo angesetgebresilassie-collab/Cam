@@ -6,18 +6,26 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -33,81 +41,320 @@ import kotlinx.coroutines.withContext
 class MainActivity : AppCompatActivity() {
 
     private lateinit var previewView: PreviewView
+    private lateinit var resultLayer: FrameLayout
     private lateinit var resultView: ImageView
     private lateinit var status: TextView
-    private lateinit var shutter: Button
-    private var imageCapture: ImageCapture? = null
+    private lateinit var shutter: FrameLayout
+    private lateinit var thumb: ImageView
+    private lateinit var modeChip: TextView
+    private lateinit var flashBtn: TextView
+    private lateinit var spinner: ProgressBar
 
-    // Gemini first, on-device enhancer as fallback
-    private val enhancer: Enhancer = GeminiEnhancer(BuildConfig.GEMINI_API_KEY, AutoEnhancer())
+    private var imageCapture: ImageCapture? = null
+    private var camera: Camera? = null
+    private var lensFacing = CameraSelector.LENS_FACING_BACK
+    private var flashMode = ImageCapture.FLASH_MODE_OFF
+    private var useAi = BuildConfig.GEMINI_API_KEY.isNotBlank()
+
+    private val hdEnhancer: Enhancer = AutoEnhancer()
+    private val aiEnhancer: Enhancer = GeminiEnhancer(BuildConfig.GEMINI_API_KEY, hdEnhancer)
+
+    private var lastOriginal: Bitmap? = null
+    private var lastEnhanced: Bitmap? = null
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startCamera() else status.text = "Camera permission is needed"
+            if (granted) bindCamera() else showStatus("Camera permission is needed")
         }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.statusBarColor = Color.BLACK
+        window.navigationBarColor = Color.BLACK
 
         val match = FrameLayout.LayoutParams.MATCH_PARENT
         val wrap = FrameLayout.LayoutParams.WRAP_CONTENT
 
-        previewView = PreviewView(this)
-        resultView = ImageView(this).apply {
-            visibility = View.GONE
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setBackgroundColor(Color.BLACK)
-            setOnClickListener { visibility = View.GONE }
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+
+        // Viewfinder (letterboxed so you see the full frame that will be captured)
+        previewView = PreviewView(this).apply {
+            scaleType = PreviewView.ScaleType.FIT_CENTER
         }
+        root.addView(previewView, FrameLayout.LayoutParams(match, match))
+        setupGestures()
+
+        // Top bar: flash + AI/HD mode
+        flashBtn = chip("\u26A1 Off").apply { setOnClickListener { cycleFlash() } }
+        modeChip = chip("").apply {
+            setOnClickListener {
+                useAi = !useAi
+                updateModeLabel()
+            }
+        }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        top.addView(flashBtn, LinearLayout.LayoutParams(wrap, wrap).apply { marginEnd = dp(12) })
+        top.addView(modeChip)
+        root.addView(
+            top,
+            FrameLayout.LayoutParams(match, wrap, Gravity.TOP).apply { topMargin = dp(40) }
+        )
+        updateFlashLabel()
+        updateModeLabel()
+
+        // Status pill under the top bar
         status = TextView(this).apply {
             setTextColor(Color.WHITE)
-            setBackgroundColor(0x88000000.toInt())
-            setPadding(32, 48, 32, 24)
+            textSize = 13f
+            visibility = View.GONE
+            background = pill(0x99000000.toInt())
+            setPadding(dp(14), dp(6), dp(14), dp(6))
         }
-        shutter = Button(this).apply {
-            text = "Capture"
+        root.addView(
+            status,
+            FrameLayout.LayoutParams(wrap, wrap, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+                .apply { topMargin = dp(96) }
+        )
+
+        spinner = ProgressBar(this).apply { visibility = View.GONE }
+        root.addView(spinner, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
+
+        // Bottom bar: last photo | shutter | flip
+        thumb = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(0x33FFFFFF)
+            }
+            clipToOutline = true
+            setOnClickListener {
+                if (lastEnhanced != null) showResult()
+            }
+        }
+
+        val ring = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setStroke(dp(4), Color.WHITE)
+                setColor(Color.TRANSPARENT)
+            }
+        }
+        val inner = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.WHITE)
+            }
+        }
+        shutter = FrameLayout(this).apply {
+            addView(ring, FrameLayout.LayoutParams(dp(84), dp(84), Gravity.CENTER))
+            addView(inner, FrameLayout.LayoutParams(dp(66), dp(66), Gravity.CENTER))
             setOnClickListener { capture() }
         }
 
-        val root = FrameLayout(this)
-        root.addView(previewView, FrameLayout.LayoutParams(match, match))
-        root.addView(resultView, FrameLayout.LayoutParams(match, match))
-        root.addView(status, FrameLayout.LayoutParams(match, wrap, Gravity.TOP))
+        val flip = TextView(this).apply {
+            text = "\u27F2"
+            textSize = 26f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0x44FFFFFF)
+            }
+            setOnClickListener { flipCamera() }
+        }
+
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        bottom.addView(cell(thumb, dp(56)), LinearLayout.LayoutParams(0, dp(96), 1f))
+        bottom.addView(cell(shutter, dp(84)), LinearLayout.LayoutParams(0, dp(96), 1f))
+        bottom.addView(cell(flip, dp(56)), LinearLayout.LayoutParams(0, dp(96), 1f))
         root.addView(
-            shutter,
-            FrameLayout.LayoutParams(wrap, wrap, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
-                .apply { bottomMargin = 96 }
+            bottom,
+            FrameLayout.LayoutParams(match, wrap, Gravity.BOTTOM).apply { bottomMargin = dp(28) }
         )
+
+        // Result viewer: hold to compare with the original
+        resultView = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setOnTouchListener { _, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> lastOriginal?.let { setImageBitmap(it) }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                        lastEnhanced?.let { setImageBitmap(it) }
+                }
+                true
+            }
+        }
+        val close = chip("\u2715").apply { setOnClickListener { resultLayer.visibility = View.GONE } }
+        val hint = TextView(this).apply {
+            text = "Hold photo to see the original"
+            setTextColor(0xCCFFFFFF.toInt())
+            textSize = 13f
+        }
+        resultLayer = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            visibility = View.GONE
+            addView(resultView, FrameLayout.LayoutParams(match, match))
+            addView(
+                close,
+                FrameLayout.LayoutParams(wrap, wrap, Gravity.TOP or Gravity.END)
+                    .apply { topMargin = dp(40); marginEnd = dp(16) }
+            )
+            addView(
+                hint,
+                FrameLayout.LayoutParams(wrap, wrap, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+                    .apply { bottomMargin = dp(40) }
+            )
+        }
+        root.addView(resultLayer, FrameLayout.LayoutParams(match, match))
+
         setContentView(root)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
-            startCamera()
+            bindCamera()
         } else {
             permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
-    private fun startCamera() {
-        val future = ProcessCameraProvider.getInstance(this)
-        future.addListener({
+    // ---- UI helpers ----
+
+    private fun pill(color: Int) = GradientDrawable().apply {
+        cornerRadius = dp(18).toFloat()
+        setColor(color)
+    }
+
+    private fun chip(label: String) = TextView(this).apply {
+        text = label
+        setTextColor(Color.WHITE)
+        textSize = 14f
+        gravity = Gravity.CENTER
+        background = pill(0x66000000)
+        setPadding(dp(14), dp(8), dp(14), dp(8))
+    }
+
+    private fun cell(v: View, size: Int) = FrameLayout(this).apply {
+        addView(v, FrameLayout.LayoutParams(size, size, Gravity.CENTER))
+    }
+
+    private fun showStatus(msg: String?) {
+        if (msg == null) {
+            status.visibility = View.GONE
+        } else {
+            status.text = msg
+            status.visibility = View.VISIBLE
+        }
+    }
+
+    private fun setBusy(busy: Boolean, msg: String? = null) {
+        spinner.visibility = if (busy) View.VISIBLE else View.GONE
+        shutter.isEnabled = !busy
+        shutter.alpha = if (busy) 0.4f else 1f
+        showStatus(msg)
+    }
+
+    private fun updateModeLabel() {
+        modeChip.text = if (useAi) "\u2728 AI" else "HD"
+    }
+
+    private fun updateFlashLabel() {
+        flashBtn.text = when (flashMode) {
+            ImageCapture.FLASH_MODE_OFF -> "\u26A1 Off"
+            ImageCapture.FLASH_MODE_AUTO -> "\u26A1 Auto"
+            else -> "\u26A1 On"
+        }
+    }
+
+    private fun cycleFlash() {
+        flashMode = when (flashMode) {
+            ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
+            ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
+            else -> ImageCapture.FLASH_MODE_OFF
+        }
+        imageCapture?.flashMode = flashMode
+        updateFlashLabel()
+    }
+
+    private fun flipCamera() {
+        val previous = lensFacing
+        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
+            CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+        if (!bindCamera()) lensFacing = previous
+    }
+
+    private fun showResult() {
+        resultView.setImageBitmap(lastEnhanced)
+        resultLayer.visibility = View.VISIBLE
+    }
+
+    // ---- Camera ----
+
+    private fun setupGestures() {
+        val scale = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val cam = camera ?: return true
+                    val state = cam.cameraInfo.zoomState.value ?: return true
+                    val target = (state.zoomRatio * detector.scaleFactor)
+                        .coerceIn(state.minZoomRatio, state.maxZoomRatio)
+                    cam.cameraControl.setZoomRatio(target)
+                    return true
+                }
+            }
+        )
+        val tap = GestureDetector(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onSingleTapUp(e: MotionEvent): Boolean {
+                    val cam = camera ?: return true
+                    val point = previewView.meteringPointFactory.createPoint(e.x, e.y)
+                    cam.cameraControl.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
+                    return true
+                }
+            }
+        )
+        previewView.setOnTouchListener { _, ev ->
+            scale.onTouchEvent(ev)
+            tap.onTouchEvent(ev)
+            true
+        }
+    }
+
+    private fun bindCamera(): Boolean {
+        return try {
+            val future = ProcessCameraProvider.getInstance(this)
             val provider = future.get()
             val preview = Preview.Builder().build()
                 .also { it.setSurfaceProvider(previewView.surfaceProvider) }
             val capture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setJpegQuality(100)
+                .setFlashMode(flashMode)
                 .build()
-            imageCapture = capture
+            val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
             provider.unbindAll()
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture)
-        }, ContextCompat.getMainExecutor(this))
+            camera = provider.bindToLifecycle(this, selector, preview, capture)
+            imageCapture = capture
+            true
+        } catch (e: Exception) {
+            Toast.makeText(this, "Camera unavailable: ${e.message}", Toast.LENGTH_SHORT).show()
+            false
+        }
     }
 
     private fun capture() {
         val cap = imageCapture ?: return
-        shutter.isEnabled = false
-        status.text = "Capturing..."
+        setBusy(true, "Capturing...")
         cap.takePicture(
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
@@ -119,45 +366,56 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onError(exception: ImageCaptureException) {
-                    status.text = "Capture failed: ${exception.message}"
-                    shutter.isEnabled = true
+                    setBusy(false, "Capture failed: ${exception.message}")
                 }
             }
         )
     }
 
     private fun enhance(raw: Bitmap, rotation: Int) {
-        status.text = "Enhancing with AI..."
+        setBusy(true, if (useAi) "Enhancing with AI..." else "Enhancing in HD...")
         lifecycleScope.launch {
-            val start = SystemClock.elapsedRealtime()
-            val result = withContext(Dispatchers.Default) {
-                val upright = if (rotation != 0) {
-                    Bitmap.createBitmap(
-                        raw, 0, 0, raw.width, raw.height,
-                        Matrix().apply { postRotate(rotation.toFloat()) }, true
-                    )
-                } else raw
-                enhancer.enhance(upright)
+            try {
+                val start = SystemClock.elapsedRealtime()
+                val enhancer = if (useAi) aiEnhancer else hdEnhancer
+                val pair = withContext(Dispatchers.Default) {
+                    val upright = if (rotation != 0) {
+                        Bitmap.createBitmap(
+                            raw, 0, 0, raw.width, raw.height,
+                            Matrix().apply { postRotate(rotation.toFloat()) }, true
+                        )
+                    } else raw
+                    Pair(upright, enhancer.enhance(upright))
+                }
+                val original = pair.first
+                val enhanced = pair.second
+                val stamp = System.currentTimeMillis()
+                withContext(Dispatchers.IO) {
+                    save(original, "CAM_${stamp}_original")
+                    save(enhanced, "CAM_$stamp")
+                }
+                lastOriginal = original
+                lastEnhanced = enhanced
+                thumb.setImageBitmap(enhanced)
+                val secs = (SystemClock.elapsedRealtime() - start) / 1000.0
+                setBusy(false, "Saved in %.1fs".format(secs))
+                showResult()
+            } catch (e: Throwable) {
+                setBusy(false, "Enhance failed: ${e.message}")
             }
-            withContext(Dispatchers.IO) { save(result) }
-            val secs = (SystemClock.elapsedRealtime() - start) / 1000.0
-            resultView.setImageBitmap(result)
-            resultView.visibility = View.VISIBLE
-            status.text = "Saved to Pictures/Cam in %.1fs. Tap photo to dismiss.".format(secs)
-            shutter.isEnabled = true
         }
     }
 
-    private fun save(bitmap: Bitmap) {
+    private fun save(bitmap: Bitmap, name: String) {
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "CAM_${System.currentTimeMillis()}.jpg")
+            put(MediaStore.Images.Media.DISPLAY_NAME, "$name.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Cam")
         }
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: return
         contentResolver.openOutputStream(uri)?.use {
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 98, it)
         }
     }
 }
