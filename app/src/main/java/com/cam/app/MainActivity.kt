@@ -10,11 +10,13 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.text.InputType
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -22,6 +24,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -54,13 +57,20 @@ class MainActivity : AppCompatActivity() {
     private var camera: Camera? = null
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var flashMode = ImageCapture.FLASH_MODE_OFF
-    private var useAi = BuildConfig.GEMINI_API_KEY.isNotBlank()
+    private var useAi = false
 
     private val hdEnhancer: Enhancer = AutoEnhancer()
-    private val aiEnhancer = GeminiEnhancer(BuildConfig.GEMINI_API_KEY, hdEnhancer)
+    private lateinit var aiEnhancer: GeminiEnhancer
 
     private var lastOriginal: Bitmap? = null
     private var lastEnhanced: Bitmap? = null
+
+    private val prefs by lazy { getSharedPreferences("cam", MODE_PRIVATE) }
+
+    /** Key entered in the app wins; otherwise the one baked in at build time. */
+    private fun currentKey(): String =
+        prefs.getString("gemini_key", null)?.trim()?.takeIf { it.isNotEmpty() }
+            ?: BuildConfig.GEMINI_API_KEY
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -74,6 +84,9 @@ class MainActivity : AppCompatActivity() {
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
 
+        aiEnhancer = GeminiEnhancer(currentKey(), hdEnhancer)
+        useAi = currentKey().isNotBlank()
+
         val match = FrameLayout.LayoutParams.MATCH_PARENT
         val wrap = FrameLayout.LayoutParams.WRAP_CONTENT
 
@@ -86,12 +99,20 @@ class MainActivity : AppCompatActivity() {
         root.addView(previewView, FrameLayout.LayoutParams(match, match))
         setupGestures()
 
-        // Top bar: flash + AI/HD mode
+        // Top bar: flash + AI/HD mode (long-press the mode chip to change the key)
         flashBtn = chip("\u26A1 Off").apply { setOnClickListener { cycleFlash() } }
         modeChip = chip("").apply {
             setOnClickListener {
-                useAi = !useAi
-                updateModeLabel()
+                if (!useAi && currentKey().isBlank()) {
+                    askForKey()
+                } else {
+                    useAi = !useAi
+                    updateModeLabel()
+                }
+            }
+            setOnLongClickListener {
+                askForKey()
+                true
             }
         }
         val top = LinearLayout(this).apply {
@@ -218,6 +239,10 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(root)
 
+        if (currentKey().isBlank()) {
+            showStatus("No Gemini key in this build. Tap HD to enter one.")
+        }
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
@@ -225,6 +250,31 @@ class MainActivity : AppCompatActivity() {
         } else {
             permissionLauncher.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    // ---- Gemini key ----
+
+    private fun askForKey() {
+        val input = EditText(this).apply {
+            hint = "Paste Gemini API key"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine()
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Gemini API key")
+            .setMessage("Stored only on this phone. Leave empty to clear it.")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val key = input.text.toString().trim()
+                prefs.edit().putString("gemini_key", key).apply()
+                aiEnhancer = GeminiEnhancer(currentKey(), hdEnhancer)
+                useAi = currentKey().isNotBlank()
+                updateModeLabel()
+                showStatus(if (useAi) "Gemini key saved. AI is on." else "No key set. Using HD.")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     // ---- UI helpers ----
