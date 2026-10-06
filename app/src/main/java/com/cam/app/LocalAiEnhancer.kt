@@ -9,11 +9,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Fully on-device AI tone/low-light enhancement using Zero-DCE (TFLite, ~0.3 MB).
+ * Fully on-device AI low-light enhancement using Zero-DCE (TFLite, ~0.3 MB).
  *
- * The model runs on the GPU (CPU only if the GPU delegate fails) on a 512x512 copy; its
- * output becomes a per-pixel brightness gain map that is upsampled and applied to the
- * full-resolution photo in parallel across all cores. [polish] then runs in place.
+ * Order matters: the photo is DENOISED first, then Zero-DCE (GPU first, CPU only if the GPU
+ * delegate fails) produces a smooth brightness gain map that is applied to the full-resolution
+ * pixels. The gain is deliberately gentle: it scales with how dark the scene actually is
+ * (bright scenes are left alone), is capped, and fades out in highlights so nothing blows out.
+ * [polish] then runs in place (it does not denoise a second time).
  *
  * [lastError] = reason for the most recent fallback (null = worked),
  * [lastBackend] = "GPU" or "CPU" for the model run.
@@ -84,11 +86,18 @@ class LocalAiEnhancer(
         }
     }
 
+    private fun smoothstep(a: Float, b: Float, x: Float): Float {
+        val t = ((x - a) / (b - a)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
     private fun run(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
         val s = SIZE
         val n = s * s
 
-        // 1) Downscale and build the model input
+        // 1) Build the model input from a downscaled copy (downscaling also averages out noise)
         val small = Bitmap.createScaledBitmap(src, s, s, true)
         val sp = IntArray(n)
         small.getPixels(sp, 0, s, 0, 0, s, s)
@@ -121,21 +130,24 @@ class LocalAiEnhancer(
             infer(input, n, false)
         }
 
-        // 3) Gain map (gentler on already bright scenes)
-        val strength = if (meanIn > 0.5) 0.4f else 0.9f
+        // 3) Gentle gain map. Bright scenes get no lift at all; dark ones get up to 0.75 of the
+        //    model's suggestion, capped at 3x, and the lift fades out in highlights.
+        val darkness = ((0.45 - meanIn) / 0.25).coerceIn(0.0, 1.0).toFloat()
+        val strength = 0.75f * darkness
         val gain = FloatArray(n)
         for (i in 0 until n) {
             val lo = 0.299f * outArr[i * 3] + 0.587f * outArr[i * 3 + 1] + 0.114f * outArr[i * 3 + 2]
-            val ratio = ((lo + 0.01f) / (lumIn[i] + 0.01f)).coerceIn(0.6f, 6f)
-            gain[i] = 1f + strength * (ratio - 1f)
+            val ratio = ((lo + 0.01f) / (lumIn[i] + 0.01f)).coerceIn(1f, 3f)
+            val taper = 1f - smoothstep(0.55f, 0.95f, lumIn[i])
+            gain[i] = 1f + strength * taper * (ratio - 1f)
         }
 
-        // 4) Apply the upsampled gain map to the full-resolution pixels, all cores
-        val w = src.width
-        val h = src.height
+        // 4) Denoise the full-resolution photo BEFORE brightening, so noise isn't amplified
         val px = IntArray(w * h)
         src.getPixels(px, 0, w, 0, 0, w, h)
+        Denoiser.run(px, w, h)
 
+        // 5) Apply the upsampled gain map, all cores
         val x0 = IntArray(w)
         val x1 = IntArray(w)
         val tx = FloatArray(w)
@@ -167,16 +179,24 @@ class LocalAiEnhancer(
 
                     val i = rowStart + x
                     val p = px[i]
-                    val r = (((p shr 16) and 0xFF) * gn).toInt().coerceAtMost(255)
-                    val g = (((p shr 8) and 0xFF) * gn).toInt().coerceAtMost(255)
-                    val b = ((p and 0xFF) * gn).toInt().coerceAtMost(255)
-                    px[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    var r = ((p shr 16) and 0xFF) * gn
+                    var g = ((p shr 8) and 0xFF) * gn
+                    var b = (p and 0xFF) * gn
+                    // Keep hue when a channel clips instead of letting colors skew
+                    val m = maxOf(r, maxOf(g, b))
+                    if (m > 255f) {
+                        val k = 255f / m
+                        r *= k
+                        g *= k
+                        b *= k
+                    }
+                    px[i] = (0xFF shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
                 }
             }
         }
 
-        // 5) Final polish (levels, sharpen, saturation) in place, then build the bitmap
-        polish.process(px, w, h)
+        // 6) Light polish (no second denoise), then build the bitmap
+        polish.process(px, w, h, denoise = false)
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         out.setPixels(px, 0, w, 0, 0, w, h)
         return out
