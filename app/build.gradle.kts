@@ -13,6 +13,16 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1"
+
+        // Set via GitHub secret GEMINI_API_KEY, env var, or -PGEMINI_API_KEY=...
+        val geminiKey = (project.findProperty("GEMINI_API_KEY") as String?)
+            ?: System.getenv("GEMINI_API_KEY")
+            ?: ""
+        buildConfigField("String", "GEMINI_API_KEY", "\"$geminiKey\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {
