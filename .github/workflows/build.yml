@@ -22,15 +22,27 @@ jobs:
       - name: Download Zero-DCE model (Apache-2.0)
         run: |
           mkdir -p app/src/main/assets
-          curl -fL -o app/src/main/assets/zerodce_512.tflite \
+          curl -fL --retry 5 --retry-delay 3 -o app/src/main/assets/zerodce_512.tflite \
             https://huggingface.co/mlboydaisuke/zero-dce-litert/resolve/main/zerodce_512.tflite
           test -s app/src/main/assets/zerodce_512.tflite
 
       - name: Download Real-ESRGAN General x4v3 model (BSD-3-Clause)
         run: |
-          curl -fL -o app/src/main/assets/realesrgan_x4v3.tflite \
-            https://huggingface.co/qualcomm/Real-ESRGAN-General-x4v3/resolve/main/Real-ESRGAN-General-x4v3.tflite \
-            || rm -f app/src/main/assets/realesrgan_x4v3.tflite
+          set +e
+          mkdir -p /tmp/esrgan app/src/main/assets
+          curl -fL --retry 5 --retry-delay 3 -o /tmp/esrgan/model.zip \
+            "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/real_esrgan_general_x4v3/releases/v0.63.0/real_esrgan_general_x4v3-tflite-float.zip"
+          unzip -o /tmp/esrgan/model.zip -d /tmp/esrgan/unzipped
+          echo "--- archive contents ---"
+          find /tmp/esrgan/unzipped -type f -exec ls -l {} \;
+          MODEL=$(find /tmp/esrgan/unzipped -name '*.tflite' -type f | head -n 1)
+          if [ -n "$MODEL" ]; then
+            cp "$MODEL" app/src/main/assets/realesrgan_x4v3.tflite
+            echo "Installed $MODEL"
+          else
+            echo "WARNING: no .tflite found, Max mode detail pass will be unavailable"
+          fi
+          echo "--- assets ---"
           ls -l app/src/main/assets
 
       - name: Build debug APK
