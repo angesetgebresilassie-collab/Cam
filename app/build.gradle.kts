@@ -12,7 +12,7 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = 1
-        versionName = "0.2"
+        versionName = "0.3"
     }
 
     androidResources {
@@ -34,8 +34,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // On-device AI
+    // On-device AI (CPU + GPU delegate)
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
 
     val camerax = "1.3.4"
     implementation("androidx.camera:camera-core:$camerax")
