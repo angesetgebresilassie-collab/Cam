@@ -1,7 +1,7 @@
 package com.cam.app
 
 import android.graphics.Bitmap
-import android.graphics.Color
+import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.pow
 
@@ -10,13 +10,17 @@ interface Enhancer {
 }
 
 /**
- * Fast on-device auto enhance: auto levels, low-light gamma lift,
- * saturation boost and a light unsharp mask. Multi-core, works in place on pixel arrays
- * so the AI modes can reuse it as their final polish step.
+ * Natural-looking on-device auto enhance (multi-core, in place on pixel arrays):
+ *  - denoise first (so nothing below amplifies grain)
+ *  - mild levels + gamma lift that only kicks in for genuinely dark photos
+ *  - tone changes are applied to brightness only, so colors keep their hue and saturation
+ *  - sharpening with a noise threshold (flat/grainy areas are left alone)
+ *  - near-neutral saturation
  */
 class AutoEnhancer(
-    private val sharpen: Float = 0.5f,
-    private val saturation: Float = 1.12f,
+    private val sharpen: Float = 0.35f,
+    private val saturation: Float = 1.05f,
+    private val core: Float = 5f,
 ) : Enhancer {
 
     override fun enhance(src: Bitmap): Bitmap {
@@ -30,45 +34,47 @@ class AutoEnhancer(
         return out
     }
 
-    /** Enhances [px] (ARGB ints, size w*h) in place. */
-    fun process(px: IntArray, w: Int, h: Int) {
-        // Luma histogram from a sparse sample (plenty for levels and brightness)
+    /** Enhances [px] (ARGB ints, size w*h) in place. Set [denoise] false if already denoised. */
+    fun process(px: IntArray, w: Int, h: Int, denoise: Boolean = true) {
+        if (denoise) Denoiser.run(px, w, h)
+
+        // Luma statistics from a sparse sample
         val hist = IntArray(256)
         var sum = 0L
         var count = 0
         var i = 0
         while (i < px.size) {
-            val l = luma(px[i])
+            val p = px[i]
+            val l = (77 * ((p shr 16) and 0xFF) + 150 * ((p shr 8) and 0xFF) + 29 * (p and 0xFF)) shr 8
             hist[l]++
             sum += l
             count++
             i += 7
         }
         count = maxOf(count, 1)
-        val lo = percentile(hist, count, 0.005)
-        val hi = maxOf(percentile(hist, count, 0.995), lo + 1)
+        // Levels stay gentle: black point at most 12, white point at least 235
+        val lo = minOf(percentile(hist, count, 0.002), 12)
+        val hi = maxOf(percentile(hist, count, 0.998), 235)
         val mean = (sum.toDouble() / count / 255.0).coerceIn(0.02, 0.98)
+        // Lift only genuinely dark photos, and only toward a modest target
+        val gamma = if (mean < 0.35) (ln(0.42) / ln(mean)).coerceIn(0.7, 1.0) else 1.0
 
-        // Brighten dark photos toward a mean of 0.45, never darken
-        val gamma = (ln(0.45) / ln(mean)).coerceIn(0.5, 1.0)
-        val lut = IntArray(256) { v ->
+        // Per-luma brightness ratio (applied equally to R, G, B so hue/saturation are preserved)
+        val ratioLut = FloatArray(256) { v ->
             val t = ((v - lo).toDouble() / (hi - lo)).coerceIn(0.0, 1.0)
-            (t.pow(gamma) * 255.0 + 0.5).toInt().coerceIn(0, 255)
+            val out = t.pow(gamma) * 255.0
+            ((out + 1.0) / (v + 1.0)).toFloat()
         }
 
-        // Blur reference for the unsharp mask: box-averaged 1/8 copy, sampled bilinearly
+        // Luma blur reference for sharpening: box-averaged 1/8 copy, sampled bilinearly
         val sw = maxOf(w / 8, 1)
         val sh = maxOf(h / 8, 1)
         val bx = maxOf(w / sw, 1)
         val by = maxOf(h / sh, 1)
-        val sr = FloatArray(sw * sh)
-        val sg = FloatArray(sw * sh)
-        val sb = FloatArray(sw * sh)
+        val sl = FloatArray(sw * sh)
         for (sy in 0 until sh) {
             for (sx in 0 until sw) {
-                var r = 0
-                var g = 0
-                var b = 0
+                var acc = 0
                 var c = 0
                 val y0 = sy * by
                 val x0 = sx * bx
@@ -79,19 +85,13 @@ class AutoEnhancer(
                     var xx = x0
                     while (xx < x1) {
                         val p = px[yy * w + xx]
-                        r += (p shr 16) and 0xFF
-                        g += (p shr 8) and 0xFF
-                        b += p and 0xFF
+                        acc += (77 * ((p shr 16) and 0xFF) + 150 * ((p shr 8) and 0xFF) + 29 * (p and 0xFF)) shr 8
                         c++
                         xx += 2
                     }
                     yy += 2
                 }
-                val d = maxOf(c, 1).toFloat()
-                val idx = sy * sw + sx
-                sr[idx] = r / d
-                sg[idx] = g / d
-                sb[idx] = b / d
+                sl[sy * sw + sx] = acc / maxOf(c, 1).toFloat()
             }
         }
 
@@ -108,6 +108,7 @@ class AutoEnhancer(
 
         val sharp = sharpen
         val sat = saturation
+        val thr = core
         parallelRows(h) { ys, ye ->
             for (y in ys until ye) {
                 val gy = ((y + 0.5f) / by - 0.5f).coerceIn(0f, sh - 1f)
@@ -119,40 +120,52 @@ class AutoEnhancer(
                 val row = y * w
                 for (x in 0 until w) {
                     val tx = ctx[x]
-                    val a = r0 + cx0[x]
-                    val b = r0 + cx1[x]
-                    val c = r1 + cx0[x]
-                    val d = r1 + cx1[x]
-                    val wa = (1f - tx) * (1f - ty)
-                    val wb = tx * (1f - ty)
-                    val wc = (1f - tx) * ty
-                    val wd = tx * ty
-                    val blurR = sr[a] * wa + sr[b] * wb + sr[c] * wc + sr[d] * wd
-                    val blurG = sg[a] * wa + sg[b] * wb + sg[c] * wc + sg[d] * wd
-                    val blurB = sb[a] * wa + sb[b] * wb + sb[c] * wc + sb[d] * wd
+                    val blurY = (sl[r0 + cx0[x]] * (1f - tx) + sl[r0 + cx1[x]] * tx) * (1f - ty) +
+                        (sl[r1 + cx0[x]] * (1f - tx) + sl[r1 + cx1[x]] * tx) * ty
 
                     val p = px[row + x]
                     val r = (p shr 16) and 0xFF
                     val g = (p shr 8) and 0xFF
-                    val bl = p and 0xFF
+                    val b = p and 0xFF
+                    val yl = (77 * r + 150 * g + 29 * b) shr 8
 
-                    var nr = lut[r] + sharp * (r - blurR)
-                    var ng = lut[g] + sharp * (g - blurG)
-                    var nb = lut[bl] + sharp * (bl - blurB)
+                    // Brightness-only tone change
+                    val ratio = ratioLut[yl]
+                    var nr = r * ratio
+                    var ng = g * ratio
+                    var nb = b * ratio
+                    val m = maxOf(nr, maxOf(ng, nb))
+                    if (m > 255f) {
+                        val kf = 255f / m
+                        nr *= kf
+                        ng *= kf
+                        nb *= kf
+                    }
 
+                    // Luma sharpening with a noise threshold
+                    val dY = yl - blurY
+                    val ad = abs(dY)
+                    if (ad > thr) {
+                        val boost = sharp * (if (dY > 0f) ad - thr else -(ad - thr))
+                        nr += boost
+                        ng += boost
+                        nb += boost
+                    }
+
+                    // Near-neutral saturation
                     val l = 0.299f * nr + 0.587f * ng + 0.114f * nb
                     nr = l + (nr - l) * sat
                     ng = l + (ng - l) * sat
                     nb = l + (nb - l) * sat
 
-                    px[row + x] = Color.rgb(clamp(nr), clamp(ng), clamp(nb))
+                    px[row + x] = (0xFF shl 24) or
+                        (nr.toInt().coerceIn(0, 255) shl 16) or
+                        (ng.toInt().coerceIn(0, 255) shl 8) or
+                        nb.toInt().coerceIn(0, 255)
                 }
             }
         }
     }
-
-    private fun luma(p: Int): Int =
-        (77 * ((p shr 16) and 0xFF) + 150 * ((p shr 8) and 0xFF) + 29 * (p and 0xFF)) shr 8
 
     private fun percentile(hist: IntArray, total: Int, q: Double): Int {
         val target = (total * q).toLong()
@@ -163,6 +176,4 @@ class AutoEnhancer(
         }
         return 255
     }
-
-    private fun clamp(v: Float): Int = v.toInt().coerceIn(0, 255)
 }
